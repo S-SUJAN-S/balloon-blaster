@@ -1,0 +1,1876 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description"
+    content="Balloon Blaster — browser arcade game by BlinkNBuild. Pop balloons, chain combos, collect power-ups!">
+  <title>🎈 Balloon Blaster — BlinkNBuild</title>
+  <!-- Emoji SVG favicon — zero HTTP request, zero 404 risk -->
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎈</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@400;600;700&display=swap"
+    rel="stylesheet">
+  <style>
+    *,
+    *::before,
+    *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html {
+      height: 100%;
+    }
+
+    body {
+      width: 100%;
+      min-height: 100vh;
+      overflow: hidden;
+      background: #050010;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-family: 'Fredoka One', cursive;
+      touch-action: none;
+      /* prevent scroll/zoom during touch gameplay */
+    }
+
+    #gameCanvas {
+      display: block;
+      cursor: crosshair;
+      touch-action: none;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <script>
+    'use strict';
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 1 — CANVAS BOOTSTRAP
+       Portrait 480×720 (2:3) — optimal for a top-to-bottom balloon shooter.
+       Gives 60% more vertical play field vs an 854×480 landscape canvas,
+       resulting in ~2.5× more reaction time on Medium difficulty.
+       Scales via CSS to fill any viewport while preserving logical coordinates.
+       ═══════════════════════════════════════════════════════════════════════════ */
+    const canvas = document.getElementById('gameCanvas');
+    if (!canvas) throw new Error('[BalloonBlaster] Canvas element not found.');
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('[BalloonBlaster] 2D context unavailable in this browser.');
+
+    const W = 480;   // Logical width  — portrait, 2:3 ratio
+    const H = 720;   // Logical height — portrait, 2:3 ratio
+    let scale = 1;
+
+    canvas.width = W;
+    canvas.height = H;
+
+    function resize() {
+      scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+      canvas.style.width = (W * scale) + 'px';
+      canvas.style.height = (H * scale) + 'px';
+    }
+    resize();
+    window.addEventListener('resize', resize, { passive: true });
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 2 — CONSTANTS  (frozen to prevent accidental mutation)
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /** Horizontal margin for shooter movement boundary. */
+    const SHOOTER_HALF_W = 28;
+
+    const BALLOON_COLORS = Object.freeze([
+      Object.freeze({ fill: '#FF4757', shine: '#FF9999', glow: '#FF0000' }),
+      Object.freeze({ fill: '#2ED573', shine: '#80FF80', glow: '#00CC44' }),
+      Object.freeze({ fill: '#1E90FF', shine: '#90C8FF', glow: '#0055DD' }),
+      Object.freeze({ fill: '#FFA502', shine: '#FFD580', glow: '#FF8800' }),
+      Object.freeze({ fill: '#A855F7', shine: '#D099FF', glow: '#8800EE' }),
+      Object.freeze({ fill: '#FF6B81', shine: '#FFB3BE', glow: '#FF0040' }),
+      Object.freeze({ fill: '#00D2D3', shine: '#80EAEA', glow: '#009999' }),
+      Object.freeze({ fill: '#FFDD57', shine: '#FFF0A0', glow: '#FFB700' }),
+    ]);
+
+    const DIFFICULTIES = Object.freeze({
+      Easy: Object.freeze({ spawnDelay: 1800, minSpeed: 1.5, maxSpeed: 3.0, mult: 1.0, color: '#2ED573', glow: '#00AA33', puDur: 20000, startLives: 5 }),
+      Medium: Object.freeze({ spawnDelay: 1200, minSpeed: 2.2, maxSpeed: 4.8, mult: 1.5, color: '#FFA502', glow: '#CC7700', puDur: 12000, startLives: 3 }),
+      Hard: Object.freeze({ spawnDelay: 700, minSpeed: 3.5, maxSpeed: 7.0, mult: 2.5, color: '#FF4757', glow: '#CC0022', puDur: 7000, startLives: 2 }),
+    });
+
+    const BALLOON_TYPES = Object.freeze([
+      Object.freeze({ name: 'small', r: 15, score: 3, prob: 0.30 }),
+      Object.freeze({ name: 'medium', r: 22, score: 2, prob: 0.50 }),
+      Object.freeze({ name: 'large', r: 30, score: 1, prob: 0.20 }),
+    ]);
+
+    /**
+     * Power-up catalogue.
+     * `dur:0`  = instant single-use (shield, life, bomb).
+     * `dur:-1` = timed — actual duration resolved from DIFFICULTIES[difficulty].puDur at activation.
+     * `weight` = relative spawn weight. Total = 22.
+     *   rapid 3 | shield 3 | multi 3 | slow 3 | life 2 | bomb 2 | dbl 3 | laser 3
+     */
+    const POWERUP_TYPES = Object.freeze([
+      Object.freeze({ id: 'rapid', icon: '⚡', label: 'RAPID FIRE', color: '#FFD700', dur: -1, weight: 3 }),
+      Object.freeze({ id: 'shield', icon: '🛡', label: 'SHIELD', color: '#00D2D3', dur: 0, weight: 3 }),
+      Object.freeze({ id: 'multi', icon: '✦', label: 'TRI-SHOT', color: '#FF69B4', dur: -1, weight: 3 }),
+      Object.freeze({ id: 'slow', icon: '❄', label: 'FREEZE', color: '#90C8FF', dur: -1, weight: 3 }),
+      Object.freeze({ id: 'life', icon: '❤', label: 'EXTRA LIFE', color: '#FF4757', dur: 0, weight: 2 }),
+      Object.freeze({ id: 'bomb', icon: '💣', label: 'BOMB BLAST!', color: '#FF8C00', dur: 0, weight: 2 }),
+      Object.freeze({ id: 'dbl', icon: '2️⃣', label: 'DOUBLE SCORE', color: '#A0FF40', dur: -1, weight: 3 }),
+      Object.freeze({ id: 'laser', icon: '🔥', label: 'LASER BEAM', color: '#FF4040', dur: -1, weight: 3 }),
+    ]);
+
+    /** Cumulative weight table for O(1) weighted random selection. */
+    const _POWERUP_WEIGHTS = (() => {
+      let cum = 0;
+      return POWERUP_TYPES.map(p => (cum += p.weight, cum));
+    })();
+    const _POWERUP_TOTAL_W = _POWERUP_WEIGHTS[_POWERUP_WEIGHTS.length - 1];
+
+    /** O(1) lookup map — avoids Array.find() on the HUD render path. */
+    const POWERUP_MAP = new Map(POWERUP_TYPES.map(p => [p.id, p]));
+
+    /**
+     * Game-over panel dimensions — single source of truth shared by getButtons()
+     * and drawGameOver() so button positions never diverge from panel content.
+     * Verified layout: all rows have positive gaps, panel fits within H=720.
+     */
+    const GAME_OVER_PANEL_H = 384;
+    const GAME_OVER_PANEL_W = 390;
+
+    /** Simple AABB hit-test. */
+    function hit(px, py, b) {
+      return px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h;
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 3 — HEX → RGBA CACHE
+       Memoised to prevent repeated string allocations on the hot render path.
+       ═══════════════════════════════════════════════════════════════════════════ */
+    const _hexCache = new Map();
+
+    function hex2rgba(hex, a) {
+      const key = hex + '|' + a;
+      if (_hexCache.has(key)) return _hexCache.get(key);
+      const rv = parseInt(hex.slice(1, 3), 16);
+      const gv = parseInt(hex.slice(3, 5), 16);
+      const bv = parseInt(hex.slice(5, 7), 16);
+      const result = `rgba(${rv},${gv},${bv},${a})`;
+      _hexCache.set(key, result);
+      return result;
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 4 — WEB AUDIO
+       All synthesis uses try/catch to silently absorb autoplay policy rejections,
+       suspended context, or absent AudioContext support.
+       ═══════════════════════════════════════════════════════════════════════════ */
+    let audioCtx = null;
+
+    function getAudio() {
+      if (!audioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        audioCtx = new Ctx();
+      }
+      return audioCtx;
+    }
+
+    function playShoot() {
+      try {
+        const ac = getAudio(); if (!ac) return;
+        const osc = ac.createOscillator(), g = ac.createGain();
+        osc.connect(g); g.connect(ac.destination);
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(900, ac.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(380, ac.currentTime + 0.09);
+        g.gain.setValueAtTime(0.12, ac.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.1);
+        osc.start(); osc.stop(ac.currentTime + 0.1);
+      } catch (_) { }
+    }
+
+    function playPop() {
+      try {
+        const ac = getAudio(); if (!ac) return;
+        const len = Math.floor(ac.sampleRate * 0.15);
+        const buf = ac.createBuffer(1, len, ac.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < len; i++)
+          d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.5);
+        const src = ac.createBufferSource();
+        src.buffer = buf;
+        const filt = ac.createBiquadFilter();
+        filt.type = 'bandpass'; filt.frequency.value = 1100;
+        const g = ac.createGain();
+        g.gain.setValueAtTime(0.7, ac.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.15);
+        src.connect(filt); filt.connect(g); g.connect(ac.destination);
+        src.start();
+      } catch (_) { }
+    }
+
+    function playMiss() {
+      try {
+        const ac = getAudio(); if (!ac) return;
+        const osc = ac.createOscillator(), g = ac.createGain();
+        osc.connect(g); g.connect(ac.destination);
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(220, ac.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(60, ac.currentTime + 0.35);
+        g.gain.setValueAtTime(0.22, ac.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.35);
+        osc.start(); osc.stop(ac.currentTime + 0.35);
+      } catch (_) { }
+    }
+
+    function playLevelUp() {
+      try {
+        const ac = getAudio(); if (!ac) return;
+        [523, 659, 784, 1047].forEach((f, i) => {
+          const osc = ac.createOscillator(), g = ac.createGain();
+          osc.connect(g); g.connect(ac.destination);
+          osc.type = 'sine'; osc.frequency.value = f;
+          const t = ac.currentTime + i * 0.13;
+          g.gain.setValueAtTime(0.2, t);
+          g.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+          osc.start(t); osc.stop(t + 0.15);
+        });
+      } catch (_) { }
+    }
+
+    function playPowerup() {
+      try {
+        const ac = getAudio(); if (!ac) return;
+        [880, 1100, 1320].forEach((f, i) => {
+          const osc = ac.createOscillator(), g = ac.createGain();
+          osc.connect(g); g.connect(ac.destination);
+          osc.type = 'sine'; osc.frequency.value = f;
+          const t = ac.currentTime + i * 0.08;
+          g.gain.setValueAtTime(0.15, t);
+          g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+          osc.start(t); osc.stop(t + 0.1);
+        });
+      } catch (_) { }
+    }
+
+    function playLifeUp() {
+      try {
+        const ac = getAudio(); if (!ac) return;
+        [523, 659, 784, 1047, 1319].forEach((f, i) => {
+          const osc = ac.createOscillator(), g = ac.createGain();
+          osc.connect(g); g.connect(ac.destination);
+          osc.type = 'sine'; osc.frequency.value = f;
+          const t = ac.currentTime + i * 0.09;
+          g.gain.setValueAtTime(0.18, t);
+          g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+          osc.start(t); osc.stop(t + 0.18);
+        });
+      } catch (_) { }
+    }
+
+    /** Combo pop — pitch scales with combo count for escalating satisfaction. */
+    function playComboTick(comboN) {
+      try {
+        const ac = getAudio(); if (!ac) return;
+        const baseF = 600 + Math.min(comboN, 20) * 40;
+        const osc = ac.createOscillator(), g = ac.createGain();
+        osc.connect(g); g.connect(ac.destination);
+        osc.type = 'triangle'; osc.frequency.value = baseF;
+        g.gain.setValueAtTime(0.13, ac.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.07);
+        osc.start(); osc.stop(ac.currentTime + 0.07);
+      } catch (_) { }
+    }
+
+    /** Low-health heartbeat thump — creates urgency. */
+    function playHeartbeat() {
+      try {
+        const ac = getAudio(); if (!ac) return;
+        [0, 0.15].forEach(delay => {
+          const osc = ac.createOscillator(), g = ac.createGain();
+          osc.connect(g); g.connect(ac.destination);
+          osc.type = 'sine'; osc.frequency.value = 55;
+          const t = ac.currentTime + delay;
+          g.gain.setValueAtTime(0.25, t);
+          g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+          osc.start(t); osc.stop(t + 0.12);
+        });
+      } catch (_) { }
+    }
+
+    /** Milestone celebration — triumphant brass-like fanfare. */
+    function playMilestone() {
+      try {
+        const ac = getAudio(); if (!ac) return;
+        [523, 659, 784, 1047, 1319, 1568].forEach((f, i) => {
+          const osc = ac.createOscillator(), g = ac.createGain();
+          osc.connect(g); g.connect(ac.destination);
+          osc.type = 'square'; osc.frequency.value = f;
+          const t = ac.currentTime + i * 0.07;
+          g.gain.setValueAtTime(0.10, t);
+          g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+          osc.start(t); osc.stop(t + 0.2);
+        });
+      } catch (_) { }
+    }
+
+    /** Game-over dramatic sting. */
+    function playGameOver() {
+      try {
+        const ac = getAudio(); if (!ac) return;
+        [440, 370, 311, 220].forEach((f, i) => {
+          const osc = ac.createOscillator(), g = ac.createGain();
+          osc.connect(g); g.connect(ac.destination);
+          osc.type = 'sawtooth'; osc.frequency.value = f;
+          const t = ac.currentTime + i * 0.18;
+          g.gain.setValueAtTime(0.14, t);
+          g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+          osc.start(t); osc.stop(t + 0.25);
+        });
+      } catch (_) { }
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 5 — GAME STATE
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    // ── Lifecycle
+    let state = 'menu';   // 'menu' | 'playing' | 'paused' | 'gameover'
+
+    // ── Player stats
+    let score = 0;
+    let highScore = (() => { try { return parseInt(localStorage.getItem('bb_highScore') || '0', 10) || 0; } catch (_) { return 0; } })();
+    let lives = 5;
+    let level = 1;
+    let combo = 0;
+    let maxCombo = 0;
+
+    // ── Persistent stats (localStorage)
+    let totalGames = (() => { try { return parseInt(localStorage.getItem('bb_totalGames') || '0', 10) || 0; } catch (_) { return 0; } })();
+    let bestCombo = (() => { try { return parseInt(localStorage.getItem('bb_bestCombo') || '0', 10) || 0; } catch (_) { return 0; } })();
+    let bestLevel = (() => { try { return parseInt(localStorage.getItem('bb_bestLevel') || '0', 10) || 0; } catch (_) { return 0; } })();
+    let totalPops = (() => { try { return parseInt(localStorage.getItem('bb_totalPops') || '0', 10) || 0; } catch (_) { return 0; } })();
+
+    // ── Streak system
+    let streak = (() => {
+      try {
+        const d = JSON.parse(localStorage.getItem('bb_streak') || '{}');
+        const today = new Date().toDateString();
+        if (d.lastDate === today) return d.count || 1;
+        const yesterday = new Date(Date.now() - 86400000).toDateString();
+        if (d.lastDate === yesterday) return (d.count || 0) + 1;
+        return 1;
+      } catch (_) { return 1; }
+    })();
+    function saveStreak() {
+      try { localStorage.setItem('bb_streak', JSON.stringify({ lastDate: new Date().toDateString(), count: streak })); } catch (_) { }
+    }
+    saveStreak();
+
+    // ── Session tracking
+    let sessionPops = 0;
+    let sessionShots = 0;
+    let sessionStartTs = 0;
+    let sessionTime = 0;
+
+    // ── Mercy mechanic
+    let mercyTimer = 0;   // frames of invulnerability after losing a life
+    const MERCY_DUR = 90;  // ~1.5 seconds at 60fps
+
+    // ── Milestone system
+    const MILESTONES = [50, 100, 200, 350, 500, 750, 1000, 1500, 2000];
+    let nextMilestoneIdx = 0;
+
+    // ── Kill streak announcements
+    const STREAK_LABELS = [
+      { at: 5, txt: 'NICE!', col: '#FFD700' },
+      { at: 10, txt: 'GREAT!', col: '#FFA502' },
+      { at: 15, txt: 'AMAZING!', col: '#FF69B4' },
+      { at: 20, txt: 'UNSTOPPABLE!', col: '#FF4757' },
+      { at: 30, txt: 'GODLIKE!', col: '#A855F7' },
+    ];
+    let lastStreakLabel = 0;
+
+    // ── Screen flash
+    let screenFlash = { a: 0, col: '#FFFFFF' };
+
+    // ── Low-health state
+    let lastHeartbeat = 0;
+
+    // ── Near-miss tracking
+    let nearMissY = H + 50;  // y threshold for near-miss detection
+
+    // ── Session config
+    let difficulty = 'Medium';
+    let shooterX = W / 2;
+    let shooterSpeed = 7;
+
+    // ── Entity arrays
+    let bullets = [];
+    let balloons = [];
+    let particles = [];
+    let floatTexts = [];
+    let powerupItems = [];
+
+    // ── Power-up runtime state
+    let activePU = {};     // { [id]: endTimestamp }
+    let shieldOn = false;
+
+    // ── Timing
+    let lastSpawn = 0;
+    let nextPUTime = 0;
+    let spawnDelay = 1200;
+
+    // ── Dynamic difficulty adaptation
+    let perfWindow = [];   // recent hit/miss results for adaptation
+    let adaptedDelay = 0;    // adjustment to spawnDelay based on performance
+
+    // ── Animation counters
+    let levelAnimT = 0;
+    let speedBumpAnim = 0;
+
+    // ── Input state
+    let mouseX = W / 2, mouseY = H / 2;
+    let keys = {};
+    let touchLeft = false;
+    let touchRight = false;
+    let lastShot = 0;
+    let lastSpeedKey = 0;
+
+    // ── Screen shake
+    let shake = { x: 0, y: 0, t: 0 };
+
+    // ── Background scene arrays
+    let bgStars = [];
+    let bgClouds = [];
+    let bgMeteors = [];
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 6 — GRADIENT CACHE
+       Background gradients are identical every frame — create once, reuse.
+       ═══════════════════════════════════════════════════════════════════════════ */
+    const _bgGrad = (() => {
+      const g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, '#060018');
+      g.addColorStop(0.45, '#0e0340');
+      g.addColorStop(0.85, '#1a0650');
+      g.addColorStop(1, '#2a0d60');
+      return g;
+    })();
+
+    const _groundFadeGrad = (() => {
+      const g = ctx.createLinearGradient(0, H - 55, 0, H);
+      g.addColorStop(0, 'rgba(10,3,30,0)');
+      g.addColorStop(1, 'rgba(5,1,15,0.9)');
+      return g;
+    })();
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 7 — BACKGROUND SCENE INIT
+       ═══════════════════════════════════════════════════════════════════════════ */
+    function reinitBG() {
+      bgStars = []; bgClouds = []; bgMeteors = [];
+      for (let i = 0; i < 90; i++) {
+        bgStars.push({
+          x: Math.random() * W,
+          y: Math.random() * H,
+          r: Math.random() * 1.6 + 0.3,
+          phase: Math.random() * Math.PI * 2,
+          spd: 0.01 + Math.random() * 0.025,
+        });
+      }
+      for (let i = 0; i < 6; i++) {
+        bgClouds.push({
+          x: Math.random() * W,
+          y: 40 + Math.random() * H * 0.45,
+          w: 70 + Math.random() * 80,
+          spd: 0.15 + Math.random() * 0.25,
+          a: 0.04 + Math.random() * 0.07,
+        });
+      }
+    }
+    reinitBG();
+
+    function spawnMeteor() {
+      bgMeteors.push({
+        x: W + 20, y: -20,
+        vx: -6 - Math.random() * 4,
+        vy: 3 + Math.random() * 2,
+        len: 40 + Math.random() * 60,
+        a: 1,
+      });
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 8 — VISIBILITY GUARD
+       Prevent a burst of balloons when the user switches tabs and returns.
+       ═══════════════════════════════════════════════════════════════════════════ */
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && state === 'playing') {
+        const now = performance.now();
+        lastSpawn = now;
+        nextPUTime = now + 8000 + Math.random() * 3000;
+      }
+    });
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 9 — INPUT HANDLING
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    // ── Keyboard
+    document.addEventListener('keydown', e => {
+      keys[e.code] = true;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (state === 'gameover') { startGame(difficulty); return; }
+        doShoot(); return;
+      }
+
+      if (e.code === 'KeyP' || e.code === 'Escape') {
+        if (audioCtx) audioCtx.resume();
+        if (state === 'playing') state = 'paused';
+        else if (state === 'paused') state = 'playing';
+        return;
+      }
+
+      // Speed control — only while actively playing, with 110 ms repeat-guard
+      if (state === 'playing') {
+        const now = performance.now();
+        if (e.code === 'ArrowUp' && now - lastSpeedKey > 110) {
+          e.preventDefault();
+          shooterSpeed = Math.min(15, shooterSpeed + 1);
+          speedBumpAnim = 38;
+          lastSpeedKey = now;
+        } else if (e.code === 'ArrowDown' && now - lastSpeedKey > 110) {
+          e.preventDefault();
+          shooterSpeed = Math.max(3, shooterSpeed - 1);
+          speedBumpAnim = 38;
+          lastSpeedKey = now;
+        }
+      }
+    });
+
+    document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+    // ── Mouse
+    canvas.addEventListener('mousemove', e => {
+      const r = canvas.getBoundingClientRect();
+      mouseX = (e.clientX - r.left) / scale;
+      mouseY = (e.clientY - r.top) / scale;
+    }, { passive: true });
+
+    canvas.addEventListener('click', e => {
+      if (audioCtx) audioCtx.resume();
+      const r = canvas.getBoundingClientRect();
+      handleCanvasClick((e.clientX - r.left) / scale, (e.clientY - r.top) / scale);
+    });
+
+    function handleCanvasClick(mx, my) {
+      if (state === 'playing') { doShoot(); return; }
+      for (const b of getButtons()) { if (hit(mx, my, b)) { b.action(); return; } }
+    }
+
+    // ── Touch
+    // FIX (Bug 2): touchLeft / touchRight were consumed in update() but no touch
+    // event listeners were ever registered, making the game unplayable on mobile.
+    // Solution: per-touch tracking map keyed by Touch.identifier so multi-touch
+    // is handled correctly and touchend for one finger doesn't clear a second.
+
+    /** @type {Map<number, {tx: number, ty: number}>} */
+    const _activeTouches = new Map();
+
+    /**
+     * Recompute touchLeft / touchRight from the currently active touch set.
+     * Called after every touchstart, touchmove, touchend, and touchcancel.
+     */
+    function _syncTouchDirs() {
+      touchLeft = touchRight = false;
+      for (const { tx } of _activeTouches.values()) {
+        if (tx < W / 2) touchLeft = true;
+        else touchRight = true;
+      }
+    }
+
+    canvas.addEventListener('touchstart', e => {
+      e.preventDefault();   // prevent scroll / zoom / delayed-click
+      if (audioCtx) audioCtx.resume();
+      const r = canvas.getBoundingClientRect();
+      for (const t of e.changedTouches) {
+        const tx = (t.clientX - r.left) / scale;
+        const ty = (t.clientY - r.top) / scale;
+        _activeTouches.set(t.identifier, { tx, ty });
+        // Update mouse position for hover effects on buttons
+        mouseX = tx; mouseY = ty;
+        if (state !== 'playing') {
+          // Route tap to button system for menu / pause / gameover screens
+          handleCanvasClick(tx, ty);
+        } else {
+          // Shoot on tap; movement direction set by _syncTouchDirs below
+          doShoot();
+        }
+      }
+      _syncTouchDirs();
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      const r = canvas.getBoundingClientRect();
+      for (const t of e.changedTouches) {
+        const tx = (t.clientX - r.left) / scale;
+        const ty = (t.clientY - r.top) / scale;
+        _activeTouches.set(t.identifier, { tx, ty });
+        mouseX = tx; mouseY = ty;
+      }
+      _syncTouchDirs();
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', e => {
+      e.preventDefault();
+      for (const t of e.changedTouches) _activeTouches.delete(t.identifier);
+      _syncTouchDirs();
+    }, { passive: false });
+
+    canvas.addEventListener('touchcancel', e => {
+      for (const t of e.changedTouches) _activeTouches.delete(t.identifier);
+      _syncTouchDirs();
+    }, { passive: false });
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 10 — BUTTON DEFINITIONS
+       ═══════════════════════════════════════════════════════════════════════════ */
+    function getButtons() {
+      if (state === 'menu') {
+        // 22% of W gives 106px-wide buttons in 480px portrait — comfortably readable
+        const bw = Math.round(W * 0.22), bh = 44, gap = 14;
+        const sx = (W - (bw * 3 + gap * 2)) / 2;
+        const y = H - Math.round(H * 0.2);
+        return [
+          { x: sx, y, w: bw, h: bh, label: 'EASY', color: DIFFICULTIES.Easy.color, glow: DIFFICULTIES.Easy.glow, action: () => startGame('Easy') },
+          { x: sx + bw + gap, y, w: bw, h: bh, label: 'MEDIUM', color: DIFFICULTIES.Medium.color, glow: DIFFICULTIES.Medium.glow, action: () => startGame('Medium') },
+          { x: sx + (bw + gap) * 2, y, w: bw, h: bh, label: 'HARD', color: DIFFICULTIES.Hard.color, glow: DIFFICULTIES.Hard.glow, action: () => startGame('Hard') },
+        ];
+      }
+      if (state === 'paused') {
+        // Anchored to the same pw/ph/py as drawPause() — both use pw=280, ph=240
+        const ph = 240;
+        const py = H / 2 - ph / 2;   // = 240
+        const bw = 160, bh = 40;
+        // btn1 top at py+142, btn2 top at py+190 — both clear of stats text (py+108) and panel bottom (py+240)
+        return [
+          { x: W / 2 - bw / 2, y: py + 142, w: bw, h: bh, label: '▶ RESUME', color: '#2ED573', glow: '#00AA33', action: () => { state = 'playing'; } },
+          { x: W / 2 - bw / 2, y: py + 190, w: bw, h: bh, label: '⬛ MENU', color: '#FF4757', glow: '#CC0022', action: () => { state = 'menu'; } },
+        ];
+      }
+      if (state === 'gameover') {
+        // Button Y anchored at py+300 — verified to sit below scoring hint box
+        // (hintBox bottom = py+284) with 16px gap, and above footer (py+364).
+        const ph = GAME_OVER_PANEL_H;
+        const py = H / 2 - ph / 2;   // = 168
+        const bw = 110, bh = 44;
+        const btnY = py + 300;   // FIX (cleanup): renamed from 'by' to 'btnY' for clarity
+        return [
+          { x: W / 2 - bw - 10, y: btnY, w: bw, h: bh, label: 'RETRY', color: '#2ED573', glow: '#00AA33', action: () => startGame(difficulty) },
+          { x: W / 2 + 10, y: btnY, w: bw, h: bh, label: 'MENU', color: '#1E90FF', glow: '#0055DD', action: () => { state = 'menu'; } },
+        ];
+      }
+      return [];
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 11 — GAME LOGIC
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * Reset all game state and begin a new session.
+     * @param {string} diff - One of 'Easy', 'Medium', 'Hard'.
+     */
+    function startGame(diff) {
+      if (!DIFFICULTIES[diff]) { console.error(`[BalloonBlaster] Unknown difficulty: "${diff}"`); return; }
+      const d = DIFFICULTIES[diff];
+      difficulty = diff;
+      spawnDelay = d.spawnDelay;
+
+      const startLives = DIFFICULTIES[diff].startLives;
+      score = 0; lives = startLives; level = 1; combo = 0; maxCombo = 0;
+      shooterX = W / 2; shooterSpeed = 7;
+
+      bullets = []; balloons = []; particles = []; floatTexts = []; powerupItems = [];
+      activePU = {}; shieldOn = false;
+      shake = { x: 0, y: 0, t: 0 };
+
+      // Session tracking reset
+      sessionPops = 0; sessionShots = 0;
+      sessionStartTs = performance.now(); sessionTime = 0;
+      nextMilestoneIdx = 0; lastStreakLabel = 0;
+      mercyTimer = 0; screenFlash = { a: 0, col: '#FFFFFF' };
+      perfWindow = []; adaptedDelay = 0;
+      lastHeartbeat = 0;
+
+      totalGames++;
+      try { localStorage.setItem('bb_totalGames', totalGames); } catch (_) { }
+
+      _activeTouches.clear();
+      touchLeft = touchRight = false;
+      lastSpawn = performance.now();
+      nextPUTime = 0;
+      levelAnimT = 0;
+      speedBumpAnim = 0;
+      state = 'playing';
+    }
+
+    /**
+     * Fire one or three bullets depending on active power-up.
+     * FIX (Bug 7): Side bullets now spawn ±8px horizontally from the barrel
+     * centre so their trails don't z-fight with the centre bullet for the first
+     * 7 frames of trail history.
+     */
+    function doShoot() {
+      if (state !== 'playing') return;
+      const now = performance.now();
+      const isRapid = activePU.rapid && activePU.rapid > now;
+      const isMulti = activePU.multi && activePU.multi > now;
+      const isLaser = activePU.laser && activePU.laser > now;
+      const cd = isRapid ? 80 : 280;
+      if (now - lastShot < cd) return;
+      lastShot = now;
+      sessionShots++;
+
+      const sy = H - 48;
+      if (isMulti) {
+        // Offset left/right bullets ±8px so their trails are distinct from frame 1
+        bullets.push({ x: shooterX - 8, y: sy, vx: -0.22, vy: -13, trail: [], laser: isLaser });
+        bullets.push({ x: shooterX, y: sy, vx: 0, vy: -14, trail: [], laser: isLaser });
+        bullets.push({ x: shooterX + 8, y: sy, vx: 0.22, vy: -13, trail: [], laser: isLaser });
+      } else {
+        bullets.push({ x: shooterX, y: sy, vx: 0, vy: -14, trail: [], laser: isLaser });
+      }
+      playShoot();
+    }
+
+    /**
+     * Spawn a balloon with random type, colour, and physics.
+     * @param {number} ts - rAF timestamp (used to check slow power-up state).
+     *
+     * FIX (Bug 1): Slow multiplier was previously baked into the balloon's
+     * .speed field here AND applied again each frame in update() — causing
+     * 0.35 × 0.35 = 12.25% speed during Freeze instead of the intended 35%.
+     * The fix removes the slow modifier from spawn entirely; update() is the
+     * single authoritative source of speed scaling.
+     */
+    function spawnBalloon() {
+
+      const rnd = Math.random();
+      let cum = 0, type = BALLOON_TYPES[1];
+      for (const t of BALLOON_TYPES) { cum += t.prob; if (rnd <= cum) { type = t; break; } }
+
+      const d = DIFFICULTIES[difficulty];
+
+      balloons.push({
+        x: type.r + 10 + Math.random() * (W - type.r * 2 - 20),
+        y: -type.r - 5,
+        r: type.r,
+        score: type.score,
+        speed: d.minSpeed + Math.random() * (d.maxSpeed - d.minSpeed),
+        col: BALLOON_COLORS[Math.floor(Math.random() * BALLOON_COLORS.length)],
+        wobble: Math.random() * Math.PI * 2,
+        wobbleSpd: 0.04 + Math.random() * 0.03,
+        driftX: (Math.random() - 0.5) * 0.4,
+      });
+    }
+
+    /**
+     * Drop a weighted-random power-up item from the top of the screen.
+     * FIX (Bug 8): Added Math.max(0, …) guard around findIndex result.
+     * If floating-point arithmetic ever produces roll === _POWERUP_TOTAL_W
+     * exactly, findIndex would return -1 and POWERUP_TYPES[-1] would be
+     * undefined, causing an immediate crash. The guard clamps to index 0.
+     */
+    function spawnPowerupItem() {
+      const roll = Math.random() * _POWERUP_TOTAL_W;
+      const idx = Math.max(0, _POWERUP_WEIGHTS.findIndex(w => roll < w));
+      const pt = POWERUP_TYPES[idx];
+      powerupItems.push({ x: 30 + Math.random() * (W - 60), y: -30, r: 20, speed: 3.8, pt, glow: 0, glowD: 1 });
+    }
+
+    /** Check if score warrants a level increase and tighten spawn rate. */
+    function updateDifficulty() {
+      const nl = Math.floor(score / 30) + 1;
+      if (nl > level) {
+        level = nl;
+        levelAnimT = 130;
+        const d = DIFFICULTIES[difficulty];
+        spawnDelay = Math.max(400, d.spawnDelay - (level - 1) * 40);
+        playLevelUp();
+        screenFlash = { a: 0.3, col: '#FFD700' };
+      }
+    }
+
+    /**
+     * Handle a balloon escaping past the bottom edge.
+     * Re-entrancy guarded: state check prevents duplicate gameover in one frame
+     * when two balloons escape simultaneously.
+     */
+    function missedBalloon(bal) {
+      if (state !== 'playing') return;
+
+      // Near-miss detection (balloon barely made it past)
+      if (bal && bal.y < H + bal.r + 25) {
+        floatTexts.push({ x: bal.x, y: H - 60, txt: '😱 CLOSE!', a: 1, vy: -2, life: 40 });
+      }
+
+      combo = 0; lastStreakLabel = 0;
+      perfWindow.push(0);  // miss
+      if (perfWindow.length > 20) perfWindow.shift();
+
+      if (shieldOn) {
+        shieldOn = false;
+        floatTexts.push({ x: W / 2, y: H / 2, txt: '🛡 Shield Blocked!', a: 1, vy: -1, life: 70 });
+        return;
+      }
+
+      // Mercy: skip damage if still in mercy window
+      if (mercyTimer > 0) {
+        floatTexts.push({ x: W / 2, y: H / 2, txt: '✨ SAFE!', a: 1, vy: -1.5, life: 40 });
+        return;
+      }
+
+      lives--;
+      shake = { x: 0, y: 0, t: 18 };
+      screenFlash = { a: 0.5, col: '#FF0000' };
+      playMiss();
+      mercyTimer = MERCY_DUR;  // grant brief invulnerability
+
+      if (lives <= 0) {
+        sessionTime = (performance.now() - sessionStartTs) / 1000;
+        // Persist all stats
+        if (score > highScore) {
+          highScore = score;
+          try { localStorage.setItem('bb_highScore', highScore); } catch (_) { }
+        }
+        if (maxCombo > bestCombo) {
+          bestCombo = maxCombo;
+          try { localStorage.setItem('bb_bestCombo', bestCombo); } catch (_) { }
+        }
+        if (level > bestLevel) {
+          bestLevel = level;
+          try { localStorage.setItem('bb_bestLevel', bestLevel); } catch (_) { }
+        }
+        totalPops += sessionPops;
+        try { localStorage.setItem('bb_totalPops', totalPops); } catch (_) { }
+        playGameOver();
+        state = 'gameover';
+      }
+    }
+
+    /**
+     * Handle a bullet–balloon collision: award points, spawn FX, update combo.
+     * @param {Object} bal - The balloon object that was popped.
+     */
+    function popBalloon(bal) {
+      const d = DIFFICULTIES[difficulty];
+      const dblActive = activePU.dbl && activePU.dbl > performance.now();
+      const streakBonus = Math.min(streak, 7);  // daily streak bonus: up to +7% per streak day
+      let pts = Math.round(bal.score * d.mult * (dblActive ? 2 : 1) * (1 + streakBonus * 0.01));
+
+      combo++;
+      sessionPops++;
+      perfWindow.push(1);  // hit
+      if (perfWindow.length > 20) perfWindow.shift();
+      if (combo > maxCombo) maxCombo = combo;
+      if (combo >= 10) pts = Math.round(pts * 2.0);
+      else if (combo >= 5) pts = Math.round(pts * 1.5);
+      score += pts;
+
+      // Combo escalation audio
+      if (combo >= 3) playComboTick(combo);
+
+      // Kill streak announcements
+      for (const sl of STREAK_LABELS) {
+        if (combo >= sl.at && lastStreakLabel < sl.at) {
+          lastStreakLabel = sl.at;
+          floatTexts.push({ x: W / 2, y: H * 0.35, txt: `🔥 ${sl.txt}`, a: 1, vy: -2, life: 80, big: true, col: sl.col });
+          screenFlash = { a: 0.35, col: sl.col };
+          break;
+        }
+      }
+
+      // Milestone celebrations
+      if (nextMilestoneIdx < MILESTONES.length && score >= MILESTONES[nextMilestoneIdx]) {
+        const m = MILESTONES[nextMilestoneIdx];
+        nextMilestoneIdx++;
+        floatTexts.push({ x: W / 2, y: H * 0.25, txt: `🎉 ${m} POINTS!`, a: 1, vy: -1.5, life: 100, big: true, col: '#FFD700' });
+        screenFlash = { a: 0.4, col: '#FFD700' };
+        playMilestone();
+        // Milestone reward: +1 life
+        lives++;
+        floatTexts.push({ x: W / 2, y: H * 0.30, txt: '❤ +1 LIFE!', a: 1, vy: -1.8, life: 80 });
+      }
+
+      // Burst particles
+      for (let i = 0; i < 20; i++) {
+        const angle = (Math.PI * 2 / 20) * i + Math.random() * 0.4;
+        const spd = 2.5 + Math.random() * 5;
+        particles.push({ x: bal.x, y: bal.y, vx: Math.cos(angle) * spd, vy: Math.sin(angle) * spd, r: 3 + Math.random() * 4, col: bal.col.fill, a: 1, life: 65 });
+      }
+      // Shockwave
+      particles.push({ x: bal.x, y: bal.y, ring: true, rr: 0, maxR: bal.r * 2.5, a: 1, col: bal.col.shine, life: 20 });
+
+      // Small balloon bonus indicator
+      const sizeLabel = bal.r <= 15 ? '🎯 ' : '';
+      const lbl = combo >= 10 ? `🔥×${combo} +${pts}` : combo >= 5 ? `⚡+${pts}` : `${sizeLabel}+${pts}`;
+      floatTexts.push({ x: bal.x, y: bal.y - bal.r - 5, txt: lbl, a: 1, vy: -1.6, life: 55 });
+
+      playPop();
+      updateDifficulty();
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 12 — UPDATE LOOP
+       All state mutation lives here. drawX functions are strictly read-only.
+       ═══════════════════════════════════════════════════════════════════════════ */
+    function update(ts) {
+      // Star twinkle and cloud drift run on every state so menu/pause stay alive
+      for (const s of bgStars) s.phase += s.spd;
+      for (const c of bgClouds) { c.x += c.spd; if (c.x > W + 120) c.x = -120; }
+
+      if (state !== 'playing') return;
+
+      // ── Shooter movement
+      if ((keys['ArrowLeft'] || keys['KeyA'] || touchLeft) && shooterX > SHOOTER_HALF_W) shooterX -= shooterSpeed;
+      if ((keys['ArrowRight'] || keys['KeyD'] || touchRight) && shooterX < W - SHOOTER_HALF_W) shooterX += shooterSpeed;
+
+      if (speedBumpAnim > 0) speedBumpAnim--;
+
+      // ── Dynamic difficulty adaptation
+      if (perfWindow.length >= 10) {
+        const hitRate = perfWindow.reduce((a, b) => a + b, 0) / perfWindow.length;
+        if (hitRate > 0.85) adaptedDelay = Math.max(-300, adaptedDelay - 2);  // doing well → speed up
+        else if (hitRate < 0.4) adaptedDelay = Math.min(400, adaptedDelay + 3); // struggling → slow down
+      }
+
+      // ── Balloon spawn (with adaptation)
+      const effectiveDelay = Math.max(300, spawnDelay + adaptedDelay);
+      if (ts - lastSpawn > effectiveDelay) { spawnBalloon(); lastSpawn = ts; }
+
+      // ── Power-up spawn
+      if (nextPUTime === 0) nextPUTime = ts + 8000 + Math.random() * 3000;
+      if (ts >= nextPUTime) { spawnPowerupItem(); nextPUTime = ts + 8000 + Math.random() * 3000; }
+
+      // ── Occasional meteor streak
+      if (Math.random() < 0.004) spawnMeteor();
+
+      // ── Bullets (squared-distance collision — avoids sqrt on the hot path)
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        b.trail.push({ x: b.x, y: b.y });
+        if (b.trail.length > 7) b.trail.shift();
+        b.x += b.vx; b.y += b.vy;
+        if (b.y < -20 || b.x < -20 || b.x > W + 20) bullets.splice(i, 1);
+      }
+
+      // ── Balloons
+      // FIX (Bug 1): speedMult is now the single point of slow-power-up application.
+      // Previously spawnBalloon() also applied 0.35×, causing double-reduction
+      // (0.35 × 0.35 = 12.25%). Now only update() scales movement speed.
+      const slowActive = activePU.slow && activePU.slow > ts;
+      const speedMult = slowActive ? 0.35 : 1;
+
+      for (let i = balloons.length - 1; i >= 0; i--) {
+        const bal = balloons[i];
+        bal.wobble += bal.wobbleSpd;
+        bal.x += bal.driftX;
+        if (bal.x < bal.r) { bal.x = bal.r; bal.driftX = Math.abs(bal.driftX); }
+        if (bal.x > W - bal.r) { bal.x = W - bal.r; bal.driftX = -Math.abs(bal.driftX); }
+        bal.y += bal.speed * speedMult;
+
+        if (bal.y > H + bal.r + 10) { const escapedBal = bal; balloons.splice(i, 1); missedBalloon(escapedBal); continue; }
+
+        // State may have changed to 'gameover' inside missedBalloon — abort loop
+        if (state !== 'playing') break;
+
+        let hitFlag = false;
+        for (let j = bullets.length - 1; j >= 0; j--) {
+          const bul = bullets[j];
+          const dx = bal.x - bul.x, dy = bal.y - bul.y;
+          if (dx * dx + dy * dy < (bal.r + 5) * (bal.r + 5)) {
+            popBalloon(bal);
+            balloons.splice(i, 1);
+            if (!bul.laser) bullets.splice(j, 1);  // laser bullets keep going
+            hitFlag = true;
+            break;
+          }
+        }
+        if (hitFlag) continue;
+      }
+
+      // ── Power-up item movement and collection
+      for (let i = powerupItems.length - 1; i >= 0; i--) {
+        const pu = powerupItems[i];
+        pu.glow += 0.07 * pu.glowD;
+        if (pu.glow > 1) pu.glowD = -1;
+        if (pu.glow < 0) pu.glowD = 1;
+        pu.y += pu.speed;
+        if (pu.y > H + 40) { powerupItems.splice(i, 1); continue; }
+
+        const dx = pu.x - shooterX, dy = pu.y - (H - 42);
+        if (dx * dx + dy * dy < (pu.r + 28) * (pu.r + 28)) {
+          if (pu.pt.id === 'shield') {
+            shieldOn = true;
+          } else if (pu.pt.id === 'life') {
+            // Lives are uncapped — every EXTRA LIFE pickup always increments
+            lives++;
+            // Radial heart-burst: 8 red particles from pickup position
+            for (let k = 0; k < 8; k++) {
+              const ang = (Math.PI * 2 / 8) * k;
+              particles.push({
+                x: pu.x, y: pu.y,
+                vx: Math.cos(ang) * 3, vy: Math.sin(ang) * 3,
+                r: 4, col: '#FF4757', a: 1, life: 45,
+              });
+            }
+            playLifeUp();
+            floatTexts.push({ x: pu.x, y: pu.y - 30, txt: `${pu.pt.icon} +1 LIFE!`, a: 1, vy: -1.2, life: 75 });
+            powerupItems.splice(i, 1);
+            continue;
+          } else if (pu.pt.id === 'bomb') {
+            // Bomb: instantly pop all on-screen balloons with proper combo tracking
+            const count = balloons.length;
+            for (const bal of balloons) {
+              const d = DIFFICULTIES[difficulty];
+              const dblActive = activePU.dbl && activePU.dbl > ts;
+              combo++;
+              if (combo > maxCombo) maxCombo = combo;
+              let pts = Math.round(bal.score * d.mult * (dblActive ? 2 : 1));
+              if (combo >= 10) pts = Math.round(pts * 2.0);
+              else if (combo >= 5) pts = Math.round(pts * 1.5);
+              score += pts;
+              // Burst particles for each balloon
+              for (let k = 0; k < 10; k++) {
+                const angle = (Math.PI * 2 / 10) * k;
+                particles.push({
+                  x: bal.x, y: bal.y,
+                  vx: Math.cos(angle) * (3 + Math.random() * 3),
+                  vy: Math.sin(angle) * (3 + Math.random() * 3),
+                  r: 3 + Math.random() * 3, col: bal.col.fill, a: 1, life: 55,
+                });
+              }
+              particles.push({ x: bal.x, y: bal.y, ring: true, rr: 0, maxR: bal.r * 2.5, a: 1, col: bal.col.shine, life: 20 });
+            }
+            balloons = [];
+            if (count > 0) updateDifficulty();
+            playPop();
+            // Big shockwave from centre
+            particles.push({ x: W / 2, y: H / 2, ring: true, rr: 0, maxR: 180, a: 1, col: '#FF8C00', life: 25 });
+            floatTexts.push({ x: W / 2, y: H / 2 - 40, txt: `💣 BOOM! ×${count}`, a: 1, vy: -1.5, life: 90 });
+            powerupItems.splice(i, 1);
+            continue;
+          } else {
+            // Resolve timed duration: -1 sentinel → difficulty-based puDur
+            const resolvedDur = pu.pt.dur === -1 ? DIFFICULTIES[difficulty].puDur : pu.pt.dur;
+            activePU[pu.pt.id] = ts + resolvedDur;
+            playPowerup();
+          }
+          const label = `${pu.pt.icon} ${pu.pt.label}!`;
+          floatTexts.push({ x: pu.x, y: pu.y - 30, txt: label, a: 1, vy: -1.2, life: 75 });
+          powerupItems.splice(i, 1);
+        }
+      }
+
+      // ── Expire timed power-ups
+      // FIX (Bug 3): Snapshot keys before iterating to avoid deleting properties
+      // during for…in, which can silently skip the next key in some JS engines.
+      for (const k of Object.keys(activePU)) {
+        if (activePU[k] < ts) delete activePU[k];
+      }
+
+      // ── Particles
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        if (p.ring) {
+          p.rr += p.maxR / p.life;
+          p.a = p.life / 20;
+          p.life--;
+          if (p.life <= 0) particles.splice(i, 1);
+          continue;
+        }
+        p.x += p.vx; p.y += p.vy;
+        p.vy += 0.18; p.vx *= 0.96;
+        p.r *= 0.97;
+        p.life--;
+        p.a = p.life / 65;
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+
+      // ── Floating score texts
+      for (let i = floatTexts.length - 1; i >= 0; i--) {
+        const t = floatTexts[i];
+        t.y += t.vy; t.life--; t.a = Math.min(1, t.life / 18);
+        if (t.life <= 0) floatTexts.splice(i, 1);
+      }
+
+      // ── Meteors
+      for (let i = bgMeteors.length - 1; i >= 0; i--) {
+        const m = bgMeteors[i];
+        m.x += m.vx; m.y += m.vy; m.a -= 0.025;
+        if (m.a <= 0 || m.x < -100) bgMeteors.splice(i, 1);
+      }
+
+      // ── Screen shake
+      if (shake.t > 0) {
+        shake.x = (Math.random() - 0.5) * 9;
+        shake.y = (Math.random() - 0.5) * 9;
+        shake.t--;
+      } else { shake.x = 0; shake.y = 0; }
+
+      if (levelAnimT > 0) levelAnimT--;
+
+      // ── Mercy timer
+      if (mercyTimer > 0) mercyTimer--;
+
+      // ── Screen flash decay
+      if (screenFlash.a > 0) screenFlash.a = Math.max(0, screenFlash.a - 0.02);
+
+      // ── Low-health heartbeat
+      if (lives === 1 && ts - lastHeartbeat > 800) {
+        playHeartbeat();
+        lastHeartbeat = ts;
+      }
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 13 — DRAWING PRIMITIVES
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /** Trace a rounded-rectangle path. Radius clamped to half of either side. */
+    function rr(x, y, w, h, r) {
+      const cr = Math.min(r, w / 2, h / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + cr, y);
+      ctx.lineTo(x + w - cr, y); ctx.quadraticCurveTo(x + w, y, x + w, y + cr);
+      ctx.lineTo(x + w, y + h - cr); ctx.quadraticCurveTo(x + w, y + h, x + w - cr, y + h);
+      ctx.lineTo(x + cr, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - cr);
+      ctx.lineTo(x, y + cr); ctx.quadraticCurveTo(x, y, x + cr, y);
+      ctx.closePath();
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 14 — DRAW: BACKGROUND
+       All state was already advanced in update(). These functions only draw.
+       ═══════════════════════════════════════════════════════════════════════════ */
+    function drawBG() {
+      // Cached gradient — zero allocation per frame
+      ctx.fillStyle = _bgGrad;
+      ctx.fillRect(0, 0, W, H);
+
+      // Stars — single save/restore for all 90 stars instead of 90 pairs
+      ctx.save();
+      ctx.fillStyle = '#ffffff';
+      for (const s of bgStars) {
+        ctx.globalAlpha = 0.35 + 0.65 * Math.abs(Math.sin(s.phase));
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+
+      // Meteors — transient gradients (only a handful ever active simultaneously)
+      for (const m of bgMeteors) {
+        ctx.save();
+        ctx.globalAlpha = m.a * 0.8;
+        const mg = ctx.createLinearGradient(m.x, m.y, m.x - m.vx * m.len / 6, m.y - m.vy * m.len / 6);
+        mg.addColorStop(0, 'rgba(255,255,255,1)');
+        mg.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.strokeStyle = mg; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(m.x, m.y);
+        ctx.lineTo(m.x - m.vx * m.len / 6, m.y - m.vy * m.len / 6);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Clouds — positions already updated in update()
+      for (const c of bgClouds) {
+        ctx.save();
+        ctx.globalAlpha = c.a;
+        ctx.fillStyle = '#9999ff';
+        const cw = c.w;
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, cw * 0.28, 0, Math.PI * 2);
+        ctx.arc(c.x + cw * 0.24, c.y - cw * 0.09, cw * 0.21, 0, Math.PI * 2);
+        ctx.arc(c.x + cw * 0.50, c.y, cw * 0.26, 0, Math.PI * 2);
+        ctx.arc(c.x + cw * 0.22, c.y + cw * 0.1, cw * 0.20, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Cached ground fade
+      ctx.fillStyle = _groundFadeGrad;
+      ctx.fillRect(0, H - 55, W, 55);
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 15 — DRAW: GAME ENTITIES
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * Draw the player's shooter turret.
+     * @param {number} ts - Current rAF timestamp, forwarded from frame().
+     *
+     * FIX (Bug 6): Previously called performance.now() directly for the shield
+     * pulse animation, breaking the clean update/draw separation. Now uses the
+     * frame's ts parameter for vsync-aligned animation.
+     */
+    function drawShooter(ts) {
+      const x = shooterX, y = H - 42;
+      ctx.save();
+      ctx.shadowColor = '#00D2D3'; ctx.shadowBlur = 20;
+
+      // Barrel
+      const bgl = ctx.createLinearGradient(x - 5, y - 22, x + 5, y - 22);
+      bgl.addColorStop(0, '#80CFFF'); bgl.addColorStop(0.5, '#1E90FF'); bgl.addColorStop(1, '#0044AA');
+      ctx.fillStyle = bgl;
+      rr(x - 5, y - 26, 10, 22, 4); ctx.fill();
+
+      // Body
+      const bodg = ctx.createLinearGradient(x - 26, y - 18, x + 26, y);
+      bodg.addColorStop(0, '#60C8FF'); bodg.addColorStop(0.5, '#0288D1'); bodg.addColorStop(1, '#01579B');
+      ctx.fillStyle = bodg;
+      rr(x - 26, y - 18, 52, 18, 9); ctx.fill();
+
+      // Wheels
+      ctx.shadowBlur = 0;
+      for (const [wx, wy] of [[x - 16, y + 1], [x + 16, y + 1]]) {
+        ctx.fillStyle = '#263238'; ctx.beginPath(); ctx.arc(wx, wy, 8, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#546E7A'; ctx.beginPath(); ctx.arc(wx, wy, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#607D8B'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(wx, wy, 6.5, 0, Math.PI * 2); ctx.stroke();
+      }
+
+      // Highlight stripe
+      ctx.globalAlpha = 0.35; ctx.fillStyle = '#ffffff';
+      rr(x - 20, y - 17, 40, 5, 3); ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // Shield aura ring — uses ts (frame timestamp) instead of performance.now()
+      if (shieldOn) {
+        ctx.strokeStyle = '#00D2D3'; ctx.lineWidth = 3;
+        ctx.globalAlpha = 0.55 + 0.45 * Math.sin(ts / 180);
+        ctx.shadowColor = '#00D2D3'; ctx.shadowBlur = 22;
+        ctx.beginPath(); ctx.arc(x, y - 8, 38, 0, Math.PI * 2); ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.restore();
+    }
+
+    function drawBullets() {
+      for (const b of bullets) {
+        // Trail — one save/restore for the whole trail
+        ctx.save();
+        ctx.fillStyle = b.laser ? '#FF4040' : '#FFD700';
+        b.trail.forEach((t, i) => {
+          ctx.globalAlpha = (i / b.trail.length) * (b.laser ? 0.6 : 0.35);
+          ctx.beginPath();
+          if (b.laser) {
+            ctx.rect(t.x - 2, t.y - 5, 4, 10);
+          } else {
+            ctx.arc(t.x, t.y, 2, 0, Math.PI * 2);
+          }
+          ctx.fill();
+        });
+        ctx.restore();
+
+        // Bullet body
+        ctx.save();
+        if (b.laser) {
+          ctx.shadowColor = '#FF4040'; ctx.shadowBlur = 22;
+          const bg = ctx.createLinearGradient(b.x, b.y - 10, b.x, b.y + 10);
+          bg.addColorStop(0, '#FF8080'); bg.addColorStop(0.5, '#FF2020'); bg.addColorStop(1, '#FF8000');
+          ctx.fillStyle = bg;
+          rr(b.x - 3, b.y - 10, 6, 20, 3); ctx.fill();
+          // Inner bright core
+          ctx.shadowBlur = 8; ctx.fillStyle = '#FFFFFF'; ctx.globalAlpha = 0.7;
+          rr(b.x - 1.5, b.y - 9, 3, 18, 1.5); ctx.fill();
+        } else {
+          ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 14;
+          const bg = ctx.createLinearGradient(b.x, b.y - 7, b.x, b.y + 7);
+          bg.addColorStop(0, '#FFD700'); bg.addColorStop(1, '#FF6348');
+          ctx.fillStyle = bg;
+          rr(b.x - 2.5, b.y - 6, 5, 12, 2.5); ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    function drawBalloon(b) {
+      const wobX = Math.sin(b.wobble) * 3;
+      const bx = b.x + wobX, by = b.y;
+      ctx.save();
+      ctx.shadowColor = b.col.glow; ctx.shadowBlur = 18;
+
+      // Balloon body — radial gradient for a glossy, lit-from-upper-left look
+      const gr = ctx.createRadialGradient(bx - b.r * 0.32, by - b.r * 0.28, b.r * 0.08, bx, by, b.r * 1.05);
+      gr.addColorStop(0, b.col.shine);
+      gr.addColorStop(0.38, b.col.fill);
+      gr.addColorStop(1, hex2rgba(b.col.fill, 0.55));
+      ctx.fillStyle = gr;
+      ctx.beginPath(); ctx.ellipse(bx, by, b.r, b.r * 1.12, 0, 0, Math.PI * 2); ctx.fill();
+
+      // Knot
+      ctx.shadowBlur = 0; ctx.fillStyle = b.col.fill;
+      const ko = b.r * 0.16, kh = b.r * 0.42;
+      ctx.beginPath();
+      ctx.moveTo(bx - ko, by + b.r * 1.08); ctx.lineTo(bx + ko, by + b.r * 1.08);
+      ctx.lineTo(bx, by + b.r * 1.08 + kh); ctx.closePath(); ctx.fill();
+
+      // String
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(bx, by + b.r * 1.08 + kh);
+      ctx.quadraticCurveTo(bx + 6, by + b.r * 2.2, bx - 4, by + b.r * 3.4);
+      ctx.stroke();
+
+      // Shine highlight
+      ctx.globalAlpha = 0.65; ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.ellipse(bx - b.r * 0.28, by - b.r * 0.3, b.r * 0.18, b.r * 0.11, -0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawPowerupItems() {
+      for (const pu of powerupItems) {
+        ctx.save();
+        const gv = 0.6 + pu.glow * 0.4;
+        ctx.shadowColor = pu.pt.color; ctx.shadowBlur = 8 + pu.glow * 24;
+        ctx.strokeStyle = pu.pt.color; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(pu.x, pu.y, pu.r, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = hex2rgba(pu.pt.color, 0.18);
+        ctx.beginPath(); ctx.arc(pu.x, pu.y, pu.r, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.font = `${pu.r}px serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff'; ctx.globalAlpha = gv;
+        ctx.fillText(pu.pt.icon, pu.x, pu.y + 1);
+        ctx.restore();
+      }
+    }
+
+    function drawParticles() {
+      for (const p of particles) {
+        if (p.ring) {
+          ctx.save();
+          ctx.globalAlpha = p.a * 0.5;
+          ctx.strokeStyle = p.col; ctx.lineWidth = 2.5;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.rr, 0, Math.PI * 2); ctx.stroke();
+          ctx.restore(); continue;
+        }
+        ctx.save();
+        ctx.globalAlpha = p.a;
+        ctx.fillStyle = p.col;
+        ctx.shadowColor = p.col; ctx.shadowBlur = 5;
+        ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(0.5, p.r), 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function drawFloatTexts() {
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (const t of floatTexts) {
+        ctx.save();
+        ctx.globalAlpha = t.a;
+        ctx.font = t.big ? '26px Fredoka One, cursive' : '16px Fredoka One, cursive';
+        ctx.strokeStyle = '#000000'; ctx.lineWidth = t.big ? 4 : 3;
+        ctx.strokeText(t.txt, t.x, t.y);
+        ctx.fillStyle = t.col || '#FFD700';
+        if (t.big) { ctx.shadowColor = t.col || '#FFD700'; ctx.shadowBlur = 16; }
+        ctx.fillText(t.txt, t.x, t.y);
+        ctx.restore();
+      }
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 16 — DRAW: HUD
+       ═══════════════════════════════════════════════════════════════════════════ */
+    function drawHUD(ts) {
+      // ── Score pill
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      rr(10, 10, 140, 34, 17); ctx.fill();
+      ctx.fillStyle = '#FFD700';
+      ctx.font = '20px Fredoka One, cursive';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`⭐ ${score}`, 20, 27);
+      ctx.restore();
+
+      // ── Speed pill
+      // Zone colour always reflects current speed — no need to watch for flashing
+      // to know which zone you're in.  Flash just adds a glow on top.
+      const spdFlash = speedBumpAnim > 0;
+      const spdCol = shooterSpeed >= 12 ? '#FF4757'
+        : shooterSpeed >= 8 ? '#FFA502'
+          : '#2ED573';
+
+      // Pill: x=10, y=50, w=158, h=28
+      ctx.save();
+      if (spdFlash) { ctx.shadowColor = spdCol; ctx.shadowBlur = 18; }
+      ctx.fillStyle = spdFlash ? hex2rgba(spdCol, 0.22) : 'rgba(0,0,0,0.45)';
+      rr(10, 50, 158, 28, 14); ctx.fill();
+      if (spdFlash) ctx.shadowBlur = 0;
+
+      // Label: "⚡ SPD N" left-aligned
+      ctx.fillStyle = spdCol;
+      ctx.font = '13px Fredoka One, cursive';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`⚡ SPD ${shooterSpeed}`, 20, 64);
+
+      // Bar: 5 segments drawn as canvas rectangles — no font/Unicode dependency
+      // Layout: pill right edge=168, right pad=7 → bar ends at 161
+      // 5 segs × 10px + 4 gaps × 3px = 62px → bar starts at 99
+      const pips = Math.round((shooterSpeed - 3) / 12 * 5);   // 0–5 filled
+      const segW = 10, segH = 13, segGap = 3;
+      const barStartX = 99, barY = 64 - segH / 2;   // vertically centred in pill
+
+      for (let i = 0; i < 5; i++) {
+        const sx = barStartX + i * (segW + segGap);
+        ctx.fillStyle = (i < pips) ? spdCol : 'rgba(255,255,255,0.12)';
+        // Small rounded segments (radius 2)
+        rr(sx, barY, segW, segH, 2); ctx.fill();
+      }
+      ctx.restore();
+
+      // ── Level pill
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      rr(W / 2 - 45, 10, 90, 34, 17); ctx.fill();
+      ctx.fillStyle = '#C084FC';
+      ctx.font = '17px Fredoka One, cursive';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`LVL ${level}`, W / 2, 27);
+      ctx.restore();
+
+      // ── Lives display — dynamic: individual hearts ≤5, compact counter >5
+      ctx.save();
+      if (lives <= 5) {
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        rr(W - 120, 10, 110, 34, 17); ctx.fill();
+        ctx.font = '15px serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        for (let i = 0; i < 5; i++) {
+          ctx.fillStyle = i < lives ? '#FF4757' : 'rgba(255,255,255,0.15)';
+          ctx.shadowColor = i < lives ? '#FF4757' : 'transparent';
+          ctx.shadowBlur = i < lives ? 6 : 0;
+          ctx.fillText(i < lives ? '♥' : '♡', W - 112 + i * 20, 27);
+        }
+      } else {
+        // Compact pill for >5 lives: "♥ ×N"
+        const liveTxt = `♥ × ${lives}`;
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        rr(W - 100, 10, 90, 34, 17); ctx.fill();
+        ctx.font = '17px Fredoka One, cursive';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#FF4757';
+        ctx.shadowColor = '#FF4757';
+        ctx.shadowBlur = 8;
+        ctx.fillText(liveTxt, W - 55, 27);
+      }
+      ctx.restore();
+
+      // ── Combo badge
+      if (combo >= 3) {
+        const pulse = 1 + 0.08 * Math.sin(ts / 90);
+        ctx.save();
+        ctx.font = `${Math.round(17 * pulse)}px Fredoka One, cursive`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.strokeStyle = '#000000'; ctx.lineWidth = 3;
+        ctx.strokeText(`${combo}× COMBO!`, W / 2, 62);
+        ctx.fillStyle = combo >= 10 ? '#FF4757' : combo >= 5 ? '#FFA502' : '#FFD700';
+        ctx.fillText(`${combo}× COMBO!`, W / 2, 62);
+        ctx.restore();
+      }
+
+      // ── Active power-up pills (O(1) POWERUP_MAP lookup)
+      // Pills wrap to second row every 4 so they never overflow the 480px canvas.
+      let pillIdx = 0;
+      for (const [id, end] of Object.entries(activePU)) {
+        if (!end || end < ts) continue;
+        const pt = POWERUP_MAP.get(id);
+        if (!pt) continue;
+        const rem = Math.ceil((end - ts) / 1000);
+        const col = pt.color;
+        const row = Math.floor(pillIdx / 4);
+        const col_ = pillIdx % 4;
+        const pillX = 12 + col_ * 58;
+        const pillY = 85 + row * 28;
+        ctx.save();
+        ctx.fillStyle = hex2rgba(col, 0.75);
+        ctx.shadowColor = col; ctx.shadowBlur = 6;
+        rr(pillX, pillY, 52, 22, 11); ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.font = '11px Fredoka One, cursive';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(`${pt.icon} ${rem}s`, pillX + 26, pillY + 11);
+        ctx.restore();
+        pillIdx++;
+      }
+      if (shieldOn) {
+        const row = Math.floor(pillIdx / 4);
+        const col_ = pillIdx % 4;
+        const pillX = 12 + col_ * 58;
+        const pillY = 85 + row * 28;
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,210,211,0.75)';
+        ctx.shadowColor = '#00D2D3'; ctx.shadowBlur = 6;
+        rr(pillX, pillY, 38, 22, 11); ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.font = '11px Fredoka One, cursive';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText('🛡 ON', pillX + 19, pillY + 11);
+        ctx.restore();
+      }
+
+      // ── Level-up banner animation
+      if (levelAnimT > 0) {
+        const alpha = Math.min(1, levelAnimT / 25);
+        const sc = 1 + 0.4 * (1 - levelAnimT / 130);
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.font = `${Math.round(42 * sc)}px Fredoka One, cursive`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.strokeStyle = '#000000'; ctx.lineWidth = 5;
+        ctx.strokeText(`⬆ LEVEL ${level}!`, W / 2, H / 2);
+        ctx.fillStyle = '#FFD700';
+        ctx.fillText(`⬆ LEVEL ${level}!`, W / 2, H / 2);
+        ctx.restore();
+      }
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 17 — DRAW: BUTTONS
+       ═══════════════════════════════════════════════════════════════════════════ */
+    function drawBtn(b, hovered) {
+      ctx.save();
+      const g = ctx.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
+      g.addColorStop(0, hovered ? b.color : hex2rgba(b.color, 0.85));
+      g.addColorStop(1, hex2rgba(b.color, 0.5));
+      ctx.fillStyle = g;
+      ctx.shadowColor = b.glow || b.color;
+      ctx.shadowBlur = hovered ? 22 : 10;
+      rr(b.x, b.y, b.w, b.h, b.h / 2); ctx.fill();
+      ctx.strokeStyle = b.color; ctx.lineWidth = 1.8;
+      rr(b.x, b.y, b.w, b.h, b.h / 2); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `${Math.round(b.h * 0.42)}px Fredoka One, cursive`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
+      ctx.restore();
+    }
+
+    function drawAllBtns() {
+      for (const b of getButtons()) {
+        drawBtn(b, mouseX >= b.x && mouseX <= b.x + b.w && mouseY >= b.y && mouseY <= b.y + b.h);
+      }
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 18 — DRAW: SCREENS
+       ═══════════════════════════════════════════════════════════════════════════ */
+    function drawMenu(ts) {
+      drawBG();
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+      // Floating decoration balloons — y=76..78% keeps them between size guide and buttons
+      const dbs = [
+        { xBase: W * 0.10, yBase: H * 0.79, r: 22, col: BALLOON_COLORS[0], phase: 0 },
+        { xBase: W * 0.50, yBase: H * 0.78, r: 14, col: BALLOON_COLORS[2], phase: 1.2 },
+        { xBase: W * 0.90, yBase: H * 0.79, r: 26, col: BALLOON_COLORS[4], phase: 2.4 },
+      ];
+      dbs.forEach(db => {
+        const bx = db.xBase + Math.sin(ts / 900 + db.phase) * 5;
+        const by = db.yBase + Math.sin(ts / 700 + db.phase) * 6;
+        ctx.shadowColor = db.col.glow; ctx.shadowBlur = 14;
+        const gr = ctx.createRadialGradient(bx - db.r * 0.3, by - db.r * 0.28, db.r * 0.08, bx, by, db.r * 1.05);
+        gr.addColorStop(0, db.col.shine); gr.addColorStop(0.4, db.col.fill); gr.addColorStop(1, hex2rgba(db.col.fill, 0.5));
+        ctx.fillStyle = gr;
+        ctx.beginPath(); ctx.ellipse(bx, by, db.r, db.r * 1.12, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur = 0; ctx.fillStyle = db.col.fill;
+        ctx.beginPath(); ctx.moveTo(bx - 3, by + db.r * 1.08); ctx.lineTo(bx + 3, by + db.r * 1.08); ctx.lineTo(bx, by + db.r * 1.5); ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(bx, by + db.r * 1.5); ctx.quadraticCurveTo(bx + 5, by + db.r * 2.5, bx - 4, by + db.r * 3.5); ctx.stroke();
+      });
+
+      // Title — font reduced from H*0.12 (86px) to H*0.095 (68px) so "🎈 BALLOON"
+      // fits within the 480px logical canvas; maxWidth is an extra safety net.
+      const titleY = H * 0.18;
+      const titleY2 = H * 0.30;
+      const titleSz = Math.round(H * 0.095);
+      const titleMaxW = Math.round(W * 0.90);
+      ctx.shadowColor = '#A855F7'; ctx.shadowBlur = 50;
+      ctx.fillStyle = 'rgba(168,85,247,0.08)';
+      ctx.beginPath(); ctx.ellipse(W / 2, titleY, W * 0.28, H * 0.09, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowColor = '#FF69B4'; ctx.shadowBlur = 30;
+      ctx.font = `${titleSz}px Fredoka One, cursive`; ctx.fillStyle = '#FFD700';
+      ctx.fillText('🎈 BALLOON', W / 2, titleY, titleMaxW);
+      ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 25; ctx.fillStyle = '#FF69B4';
+      ctx.fillText('BLASTER', W / 2, titleY2, titleMaxW);
+      ctx.shadowBlur = 0;
+
+      // High score + streak
+      ctx.font = `${Math.round(H * 0.034)}px Fredoka One, cursive`; ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillText(`🏆 Best Score: ${highScore}`, W / 2, H * 0.42);
+      if (streak > 1) {
+        ctx.font = `${Math.round(H * 0.026)}px Fredoka One, cursive`; ctx.fillStyle = 'rgba(255,180,80,0.7)';
+        ctx.fillText(`🔥 ${streak}-Day Streak  (+${Math.min(streak, 7)}% bonus)`, W / 2, H * 0.455);
+      }
+      if (totalGames > 0) {
+        ctx.font = `${Math.round(H * 0.020)}px Nunito, sans-serif`; ctx.fillStyle = 'rgba(180,180,255,0.45)';
+        ctx.fillText(`${totalGames} Games  •  ${totalPops} Total Pops  •  Best Combo: ${bestCombo}×`, W / 2, H * 0.485);
+      }
+
+      // Controls reference
+      const infoY = H * 0.54;
+      ctx.font = `${Math.round(H * 0.026)}px Nunito, sans-serif`; ctx.fillStyle = 'rgba(180,160,240,0.65)';
+      ctx.fillText('← → / A D  to Move', W / 2, infoY);
+      ctx.fillText('Space to Shoot  •  ↑ ↓ Speed', W / 2, infoY + H * 0.038);
+      ctx.fillText('P / Esc  to Pause', W / 2, infoY + H * 0.076);
+
+      // Balloon size guide + power-up legend
+      ctx.font = `${Math.round(H * 0.023)}px Nunito, sans-serif`; ctx.fillStyle = 'rgba(255,200,80,0.6)';
+      ctx.fillText('🔴 Small +3pt  •  🔵 Medium +2pt  •  🟢 Large +1pt', W / 2, H * 0.655);
+      ctx.font = `${Math.round(H * 0.020)}px Nunito, sans-serif`; ctx.fillStyle = 'rgba(180,240,180,0.55)';
+      ctx.fillText('⚡ Rapid  ✦ Tri-Shot  ❄ Freeze  🛡 Shield', W / 2, H * 0.678);
+      ctx.fillText('❤ Life  💣 Bomb  2️⃣ ×2 Score  🔥 Laser — timed', W / 2, H * 0.698);
+
+      // Difficulty selector label — positioned below size guide lines with clear gap
+      ctx.font = `${Math.round(H * 0.042)}px Fredoka One, cursive`; ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      ctx.fillText('SELECT DIFFICULTY', W / 2, H * 0.735);
+
+      ctx.restore();
+      drawAllBtns();
+
+      // Footer
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `${Math.round(H * 0.022)}px Nunito, sans-serif`;
+      ctx.fillStyle = 'rgba(255,255,255,0.2)';
+      ctx.fillText('BlinkNBuild © Balloon Blaster — Browser Edition', W / 2, H - 12);
+      ctx.restore();
+    }
+
+    function drawPause() {
+      // Full-screen dim overlay
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.72)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+
+      // Panel — same constants used in getButtons() 'paused' branch
+      const pw = 280, ph = 240;
+      const px = W / 2 - pw / 2, py = H / 2 - ph / 2;
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(12,3,40,0.96)';
+      rr(px, py, pw, ph, 20); ctx.fill();
+      ctx.strokeStyle = '#A855F7'; ctx.lineWidth = 2;
+      rr(px, py, pw, ph, 20); ctx.stroke();
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = '30px Fredoka One, cursive';
+      ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 16; ctx.fillStyle = '#FFD700';
+      ctx.fillText('⏸ PAUSED', W / 2, py + 42);
+      ctx.shadowBlur = 0;
+
+      ctx.font = '13px Nunito, sans-serif';
+      ctx.fillStyle = 'rgba(200,180,255,0.65)';
+      ctx.fillText(`Score: ${score}  •  Level: ${level}  •  ${difficulty}`, W / 2, py + 88, 256);
+      ctx.fillText(`Speed: ${shooterSpeed}`, W / 2, py + 108);
+      ctx.restore();
+
+      drawAllBtns();
+    }
+
+    function drawGameOver() {
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.68)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+
+      const pw = GAME_OVER_PANEL_W;
+      const ph = GAME_OVER_PANEL_H;
+      const px = W / 2 - pw / 2;
+      const py = H / 2 - ph / 2;
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(8,2,25,0.96)';
+      rr(px, py, pw, ph, 24); ctx.fill();
+      ctx.strokeStyle = '#FF4757'; ctx.lineWidth = 2;
+      rr(px, py, pw, ph, 24); ctx.stroke();
+
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+      // Title
+      ctx.font = '36px Fredoka One, cursive';
+      ctx.shadowColor = '#FF4757'; ctx.shadowBlur = 22;
+      ctx.fillStyle = '#FF4757';
+      ctx.fillText('GAME OVER!', W / 2, py + 44);
+      ctx.shadowBlur = 0;
+
+      // Score
+      ctx.font = '22px Fredoka One, cursive'; ctx.fillStyle = '#FFD700';
+      ctx.fillText(`Score: ${score}`, W / 2, py + 88);
+
+      // Session stats row
+      const acc = sessionShots > 0 ? Math.round((sessionPops / sessionShots) * 100) : 0;
+      const timeStr = sessionTime >= 60 ? `${Math.floor(sessionTime / 60)}m ${Math.floor(sessionTime % 60)}s` : `${Math.floor(sessionTime)}s`;
+      ctx.font = '12px Nunito, sans-serif'; ctx.fillStyle = 'rgba(200,180,255,0.7)';
+      ctx.fillText(`${sessionPops} Pops  •  ${acc}% Accuracy  •  ${timeStr}`, W / 2, py + 117);
+      ctx.fillText(`Level ${level}  •  Best Combo: ${maxCombo}×  •  ${difficulty}`, W / 2, py + 137);
+
+      // High score / challenge
+      if (score > 0 && score >= highScore) {
+        ctx.font = '19px Fredoka One, cursive'; ctx.fillStyle = '#FFD700';
+        ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 14;
+        ctx.fillText('🏆 NEW HIGH SCORE!', W / 2, py + 170);
+        ctx.shadowBlur = 0;
+      } else if (highScore > 0) {
+        const diff = highScore - score;
+        ctx.font = '13px Fredoka One, cursive'; ctx.fillStyle = 'rgba(255,200,100,0.7)';
+        ctx.fillText(`${diff} points from your best!`, W / 2, py + 170);
+      } else {
+        ctx.font = '13px Fredoka One, cursive'; ctx.fillStyle = 'rgba(255,255,255,0.35)';
+        ctx.fillText('First game — set your record!', W / 2, py + 170);
+      }
+
+      // Streak + all-time stats box
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      rr(px + 20, py + 192, pw - 40, 90, 10); ctx.fill();
+
+      ctx.font = '12px Nunito, sans-serif'; ctx.fillStyle = 'rgba(180,240,180,0.7)';
+      if (streak > 1) ctx.fillText(`🔥 ${streak}-Day Streak!  (+${Math.min(streak, 7)}% bonus)`, W / 2, py + 212);
+      else ctx.fillText('Play daily to build a streak bonus!', W / 2, py + 212);
+
+      ctx.fillStyle = 'rgba(200,200,255,0.55)';
+      ctx.fillText(`Games: ${totalGames}  •  All-Time Pops: ${totalPops + sessionPops}`, W / 2, py + 234);
+      ctx.fillText(`Best Combo: ${Math.max(bestCombo, maxCombo)}×  •  Best Level: ${Math.max(bestLevel, level)}`, W / 2, py + 254);
+
+      // Next milestone tease
+      if (nextMilestoneIdx < MILESTONES.length) {
+        const nextM = MILESTONES[nextMilestoneIdx];
+        ctx.fillStyle = 'rgba(255,215,0,0.5)';
+        ctx.fillText(`Next milestone: ${nextM} pts (❤ +1 Life reward)`, W / 2, py + 274);
+      }
+
+      ctx.restore();
+      drawAllBtns();
+
+      // Footer with quick-retry hint
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = '11px Nunito, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.fillText('Press SPACE to retry', W / 2, py + 358);
+      ctx.font = '10px Nunito, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.fillText('BlinkNBuild © Balloon Blaster', W / 2, py + 374);
+      ctx.restore();
+    }
+
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECTION 19 — MAIN GAME LOOP
+       ═══════════════════════════════════════════════════════════════════════════ */
+    function frame(ts) {
+      update(ts);
+      ctx.clearRect(0, 0, W, H);
+
+      if (state === 'menu') {
+        drawMenu(ts);
+      } else {
+        ctx.save();
+        ctx.translate(shake.x, shake.y);
+
+        drawBG();
+        for (const b of balloons) drawBalloon(b);
+        drawPowerupItems();
+        drawBullets();
+        drawShooter(ts);
+        drawParticles();
+        drawFloatTexts();
+
+        ctx.restore();
+
+        // Mercy invulnerability flash
+        if (mercyTimer > 0 && Math.floor(mercyTimer / 6) % 2 === 0) {
+          ctx.save(); ctx.globalAlpha = 0.12; ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, W, H); ctx.restore();
+        }
+
+        // Screen flash overlay
+        if (screenFlash.a > 0) {
+          ctx.save(); ctx.globalAlpha = screenFlash.a; ctx.fillStyle = screenFlash.col;
+          ctx.fillRect(0, 0, W, H); ctx.restore();
+        }
+
+        // Low-health red vignette
+        if (state === 'playing' && lives === 1) {
+          ctx.save();
+          const pulse = 0.15 + 0.1 * Math.sin(ts / 200);
+          const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H * 0.7);
+          vg.addColorStop(0, 'rgba(255,0,0,0)'); vg.addColorStop(1, `rgba(255,0,0,${pulse})`);
+          ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+          ctx.restore();
+        }
+
+        if (state === 'playing' || state === 'paused') drawHUD(ts);
+        if (state === 'paused') drawPause();
+        if (state === 'gameover') drawGameOver();
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+  </script>
+</body>
+
+</html>
